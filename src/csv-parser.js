@@ -28,6 +28,8 @@ const COLUMN_MAP = {
   provider_name: ['provider_name', 'provider', 'doctor', 'clinician'],
   no_show_count: ['no_show_count', 'no_shows', 'noshows', 'no shows'],
   preferred_language: ['preferred_language', 'language'],
+  age: ['age', 'patient_age', 'patient age'],
+  condition: ['condition', 'diagnosis', 'patient_condition', 'clinical_context', 'concern'],
 };
 
 function mapHeader(header) {
@@ -92,6 +94,7 @@ async function parseAndIngest(csvBuffer) {
         phone: row.phone,
         preferred_language: row.preferred_language || 'en',
         no_show_count: parseInt(row.no_show_count || '0', 10) || 0,
+        age: row.age ? parseInt(row.age, 10) : null,
       });
 
       const appointment = await db.upsertAppointment({
@@ -99,6 +102,7 @@ async function parseAndIngest(csvBuffer) {
         scheduled_at: new Date(row.scheduled_at).toISOString(),
         appointment_type: row.appointment_type,
         provider_name: row.provider_name || null,
+        patient_condition: row.condition || null,
       });
 
       const { score, reason } = scoreAppointment(appointment, patient);

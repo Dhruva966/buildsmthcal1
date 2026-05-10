@@ -62,10 +62,22 @@ function classifySentiment(transcript) {
 function classifyOutcomeFromTranscript(transcript) {
   if (!transcript || transcript.trim().length < 30) return 'no_answer';
   const t = transcript.toLowerCase();
-  if (/reschedule|different time|can't make it|move.*appointment|another time/.test(t)) return 'rescheduled';
-  if (/won't come|can't come|not coming|don't want|decline|cancel/.test(t)) return 'declined';
-  if (/yes|confirm|i'll be there|will be there|sounds good|absolutely|see you|looking forward/.test(t)) return 'confirmed';
+  if (/reschedule|different time|can't make it|move.*appointment|another time|new time|pick another/.test(t)) return 'rescheduled';
+  if (/won't come|can't come|not coming|don't want|decline|cancel|not able to|unable to make/.test(t)) return 'declined';
+  if (/yes|confirm|i'll be there|will be there|sounds good|absolutely|see you|looking forward|i'll make it|i can make it|planning to/.test(t)) return 'confirmed';
   return transcript.length > 100 ? 'confirmed' : 'no_answer';
+}
+
+function classifyNoShowReason(transcript) {
+  if (!transcript) return null;
+  const t = transcript.toLowerCase();
+  if (/transport|ride|bus|car|drive|uber|lyft|no car|no ride|getting there/.test(t)) return 'transportation';
+  if (/cost|afford|insurance|pay|money|copay|deductible|expensive/.test(t)) return 'cost';
+  if (/work|job|shift|meeting|busy|schedule|conflict|obligation|can't get off/.test(t)) return 'scheduling';
+  if (/nerv|anxious|anxiety|scared|afraid|not ready|overwhelm|uncertain|worried about coming/.test(t)) return 'anxiety';
+  if (/sick|unwell|not feeling|flu|fever|feeling bad|ill/.test(t)) return 'illness';
+  if (/forgot|didn't know|not aware|didn't remember/.test(t)) return 'forgot';
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -139,9 +151,13 @@ app.post('/api/calls/trigger', async (req, res) => {
 
     const dynamicVars = {
       patient_name: patient.name,
+      patient_age: patient.age ? String(patient.age) : '',
+      patient_condition: appt.patient_condition || appt.appointment_type,
       appointment_type: appt.appointment_type,
       provider_name: appt.provider_name || 'your provider',
       scheduled_at: new Date(appt.scheduled_at).toLocaleString('en-US', { dateStyle: 'full', timeStyle: 'short' }),
+      clinic_name: process.env.CLINIC_NAME || 'the clinic',
+      no_show_count: String(patient.no_show_count || 0),
       available_slots: slots.length > 0
         ? slots.map((s, i) => `${i + 1}. ${new Date(s.scheduled_at).toLocaleString('en-US', { dateStyle: 'full', timeStyle: 'short' })}`).join('\n')
         : 'Please call us for available times.',
@@ -242,9 +258,13 @@ app.post('/api/calls/batch', async (req, res) => {
         status: 'pending',
         dynamicVars: {
           patient_name: appt.patients.name,
+          patient_age: appt.patients.age ? String(appt.patients.age) : '',
+          patient_condition: appt.patient_condition || appt.appointment_type,
           appointment_type: appt.appointment_type,
           provider_name: appt.provider_name || 'your provider',
           scheduled_at: new Date(appt.scheduled_at).toLocaleString('en-US', { dateStyle: 'full', timeStyle: 'short' }),
+          clinic_name: process.env.CLINIC_NAME || 'the clinic',
+          no_show_count: String(appt.patients.no_show_count || 0),
           available_slots: slots.length > 0
             ? slots.map((s, i) => `${i + 1}. ${new Date(s.scheduled_at).toLocaleString('en-US', { dateStyle: 'full', timeStyle: 'short' })}`).join('\n')
             : 'Please call us for available times.',
@@ -263,9 +283,13 @@ app.post('/api/calls/batch', async (req, res) => {
         status: 'pending',
         dynamicVars: {
           patient_name: c.name || 'Patient',
-          appointment_type: c.appointment_type || 'your appointment',
+          patient_age: c.age ? String(c.age) : '',
+          patient_condition: c.condition || c.appointment_type || 'your appointment',
+          appointment_type: c.appointment_type || 'appointment',
           provider_name: c.provider_name || 'your provider',
           scheduled_at: c.scheduled_at || 'your upcoming appointment',
+          clinic_name: process.env.CLINIC_NAME || 'the clinic',
+          no_show_count: '0',
           available_slots: 'Please call us for available times.',
         },
       });
@@ -428,6 +452,7 @@ app.ws('/media-stream', (ws, req) => {
         const durationSeconds = Math.round((Date.now() - startTime) / 1000);
         const outcome = classifyOutcomeFromTranscript(transcript);
         const sentiment = classifySentiment(transcript);
+        const noShowReason = (outcome === 'declined' || outcome === 'rescheduled') ? classifyNoShowReason(transcript) : null;
 
         if (callRecordId) {
           await db.updateCall(callRecordId, {
@@ -458,6 +483,7 @@ app.ws('/media-stream', (ws, req) => {
               call_id: callRecordId,
               outcome,
               sentiment,
+              no_show_reason: noShowReason,
               duration_seconds: durationSeconds,
               transcript,
               patient_name:     patient?.name || null,
