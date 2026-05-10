@@ -217,6 +217,92 @@ app.get('/api/waitlist', async (_req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// Batch call endpoints
+// ---------------------------------------------------------------------------
+
+// POST /api/calls/batch — start a consecutive batch
+// Body: { appointment_ids?: string[], contacts?: { phone, name, appointment_type?, scheduled_at?, provider_name? }[] }
+app.post('/api/calls/batch', async (req, res) => {
+  const { appointment_ids, contacts } = req.body;
+  if (batchActive || batchQueue.some(i => i.status === 'pending' || i.status === 'calling')) {
+    return res.status(409).json({ error: 'A batch is already running. Cancel it first.' });
+  }
+  batchQueue.length = 0;
+
+  if (appointment_ids?.length) {
+    for (const aid of appointment_ids) {
+      const appt = await db.getAppointment(aid).catch(() => null);
+      if (!appt || !appt.patients?.phone) continue;
+      const slots = await db.getNextAvailableSlots(appt.provider_name, 3).catch(() => []);
+      batchQueue.push({
+        id: aid,
+        appointment_id: aid,
+        phone: appt.patients.phone,
+        name: appt.patients.name,
+        status: 'pending',
+        dynamicVars: {
+          patient_name: appt.patients.name,
+          appointment_type: appt.appointment_type,
+          provider_name: appt.provider_name || 'your provider',
+          scheduled_at: new Date(appt.scheduled_at).toLocaleString('en-US', { dateStyle: 'full', timeStyle: 'short' }),
+          available_slots: slots.length > 0
+            ? slots.map((s, i) => `${i + 1}. ${new Date(s.scheduled_at).toLocaleString('en-US', { dateStyle: 'full', timeStyle: 'short' })}`).join('\n')
+            : 'Please call us for available times.',
+        },
+      });
+    }
+  } else if (contacts?.length) {
+    for (const c of contacts) {
+      if (!c.phone) continue;
+      const id = `csv-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+      batchQueue.push({
+        id,
+        appointment_id: null,
+        phone: c.phone,
+        name: c.name || 'Patient',
+        status: 'pending',
+        dynamicVars: {
+          patient_name: c.name || 'Patient',
+          appointment_type: c.appointment_type || 'your appointment',
+          provider_name: c.provider_name || 'your provider',
+          scheduled_at: c.scheduled_at || 'your upcoming appointment',
+          available_slots: 'Please call us for available times.',
+        },
+      });
+    }
+  }
+
+  if (batchQueue.length === 0) {
+    return res.status(400).json({ error: 'No valid contacts to call. Ensure phone numbers are present.' });
+  }
+
+  logger.info({ count: batchQueue.length }, 'batch: queue loaded, starting');
+  res.json({ queued: batchQueue.length, queue: batchQueue });
+  processNextBatch();
+});
+
+// GET /api/calls/batch-status
+app.get('/api/calls/batch-status', (_req, res) => {
+  res.json({
+    total: batchQueue.length,
+    pending: batchQueue.filter(i => i.status === 'pending').length,
+    calling: batchQueue.filter(i => i.status === 'calling').length,
+    done: batchQueue.filter(i => i.status === 'done').length,
+    failed: batchQueue.filter(i => i.status === 'failed').length,
+    active: batchActive,
+    queue: batchQueue,
+  });
+});
+
+// DELETE /api/calls/batch — cancel remaining
+app.delete('/api/calls/batch', (_req, res) => {
+  batchQueue.forEach(i => { if (i.status === 'pending') i.status = 'cancelled'; });
+  batchActive = false;
+  logger.info('batch: cancelled by user');
+  res.json({ cancelled: true });
+});
+
+// ---------------------------------------------------------------------------
 // TwiML — Twilio fetches this when patient answers
 // Returns <Connect><Stream> pointing back to our /media-stream WebSocket
 // ---------------------------------------------------------------------------
@@ -244,6 +330,34 @@ app.post('/call-status', (req, res) => res.sendStatus(200));
 // ---------------------------------------------------------------------------
 
 const mediaSessions = new Map(); // streamSid → session object
+
+// ---------------------------------------------------------------------------
+// Batch call queue — consecutive calls (one Twilio number = one at a time)
+// ---------------------------------------------------------------------------
+
+const batchQueue = []; // { id, appointment_id, phone, name, dynamicVars, status, callSid, outcome }
+let batchActive = false;
+
+async function processNextBatch() {
+  const next = batchQueue.find(i => i.status === 'pending');
+  if (!next || batchActive) return;
+  batchActive = true;
+  next.status = 'calling';
+  try {
+    const { retell_call_id } = await createRetellCall({
+      toNumber: next.phone,
+      dynamicVariables: next.dynamicVars || {},
+      metadata: { appointment_id: next.appointment_id || next.id },
+    });
+    next.callSid = retell_call_id;
+    logger.info({ batchId: next.id, callSid: retell_call_id }, 'batch: call started');
+  } catch (err) {
+    logger.error({ batchId: next.id, err: err.message }, 'batch: call failed');
+    next.status = 'failed';
+    batchActive = false;
+    processNextBatch();
+  }
+}
 
 app.ws('/media-stream', (ws, req) => {
   const taskId = req.query.taskId || '';
@@ -355,6 +469,15 @@ app.ws('/media-stream', (ws, req) => {
             }),
           }).catch(err => logger.warn({ err: err.message }, 'N8N webhook failed'));
         }
+
+        // Advance batch queue if this call was part of one
+        const batchItem = batchQueue.find(i => i.callSid === callSid || i.appointment_id === sid || i.id === sid);
+        if (batchItem) {
+          batchItem.status = 'done';
+          batchItem.outcome = outcome;
+        }
+        batchActive = false;
+        processNextBatch();
 
         agent.disconnect();
         mediaSessions.delete(streamSid);

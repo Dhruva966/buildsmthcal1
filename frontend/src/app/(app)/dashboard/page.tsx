@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useRef } from 'react'
 import { toast } from 'sonner'
+import Link from 'next/link'
 
 const API = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000'
 
@@ -57,16 +58,19 @@ export default function DashboardPage() {
   const [calling, setCalling] = useState<string | null>(null)
   const [uploading, setUploading] = useState(false)
   const [loading, setLoading] = useState(true)
+  const [activeCalls, setActiveCalls] = useState<number>(0)
   const fileRef = useRef<HTMLInputElement>(null)
 
   async function fetchData() {
     try {
-      const [apptRes, wlRes] = await Promise.all([
+      const [apptRes, wlRes, healthRes] = await Promise.all([
         fetch(`${API}/api/appointments/all`),
         fetch(`${API}/api/waitlist`),
+        fetch(`${API}/api/health`),
       ])
       if (apptRes.ok) setAppointments(await apptRes.json())
       if (wlRes.ok) setWaitlist(await wlRes.json())
+      if (healthRes.ok) { const h = await healthRes.json(); setActiveCalls(h.activeCalls ?? 0) }
     } catch {
       toast.error('Failed to load data')
     } finally {
@@ -106,7 +110,7 @@ export default function DashboardPage() {
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || 'Call failed')
-      toast.success('Call initiated via Retell AI')
+      toast.success('Call initiated via OpenAI + Twilio')
       await fetchData()
     } catch (err: unknown) {
       toast.error(err instanceof Error ? err.message : 'Call failed')
@@ -121,12 +125,24 @@ export default function DashboardPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight">Cadence</h1>
+          <h1 className="text-2xl font-bold tracking-tight">Dashboard</h1>
           <p className="text-sm text-muted-foreground mt-1">
-            No-show prevention for mental health practices
+            Appointments, outreach status, and risk scores
           </p>
         </div>
-        <div>
+        <div className="flex items-center gap-3">
+          {activeCalls > 0 && (
+            <span className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-blue-500/15 text-blue-400 text-xs font-medium">
+              <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />
+              {activeCalls} active call{activeCalls !== 1 ? 's' : ''}
+            </span>
+          )}
+          <Link
+            href="/calls"
+            className="px-4 py-2 rounded-lg border border-border text-sm font-medium hover:bg-muted/40 transition"
+          >
+            Call History
+          </Link>
           <input
             ref={fileRef}
             type="file"
